@@ -2,8 +2,6 @@ import os
 import time
 import random
 import requests
-from kucoin.client import Market
-market = Market(url='https://api.kucoin.com')
 import sys
 import datetime
 import traceback
@@ -18,102 +16,8 @@ import logging
 import json
 import uuid
 
-from nacl.signing import SigningKey
-
-# -----------------------------
-# Robinhood market-data (current ASK), same source as rhcb.py trader:
-#   GET /api/v1/crypto/marketdata/best_bid_ask/?symbol=BTC-USD
-#   use result["ask_inclusive_of_buy_spread"]
-# -----------------------------
-ROBINHOOD_BASE_URL = "https://trading.robinhood.com"
-
-_RH_MD = None  # lazy-init so import doesn't explode if creds missing
-
-
-class RobinhoodMarketData:
-    def __init__(self, api_key: str, base64_private_key: str, base_url: str = ROBINHOOD_BASE_URL, timeout: int = 10):
-        self.api_key = (api_key or "").strip()
-        self.base_url = (base_url or "").rstrip("/")
-        self.timeout = timeout
-
-        if not self.api_key:
-            raise RuntimeError("Robinhood API key is empty (r_key.txt).")
-
-        try:
-            raw_private = base64.b64decode((base64_private_key or "").strip())
-            self.private_key = SigningKey(raw_private)
-        except Exception as e:
-            raise RuntimeError(f"Failed to decode Robinhood private key (r_secret.txt): {e}")
-
-        self.session = requests.Session()
-
-    def _get_current_timestamp(self) -> int:
-        return int(time.time())
-
-    def _get_authorization_header(self, method: str, path: str, body: str, timestamp: int) -> dict:
-        # matches the trader's signing format
-        method = method.upper()
-        body = body or ""
-        message_to_sign = f"{self.api_key}{timestamp}{path}{method}{body}"
-        signed = self.private_key.sign(message_to_sign.encode("utf-8"))
-        signature_b64 = base64.b64encode(signed.signature).decode("utf-8")
-
-        return {
-            "x-api-key": self.api_key,
-            "x-timestamp": str(timestamp),
-            "x-signature": signature_b64,
-            "Content-Type": "application/json",
-        }
-
-    def make_api_request(self, method: str, path: str, body: str = "") -> dict:
-        url = f"{self.base_url}{path}"
-        ts = self._get_current_timestamp()
-        headers = self._get_authorization_header(method, path, body, ts)
-
-        resp = self.session.request(method=method.upper(), url=url, headers=headers, data=body or None, timeout=self.timeout)
-        if resp.status_code >= 400:
-            raise RuntimeError(f"Robinhood HTTP {resp.status_code}: {resp.text}")
-        return resp.json()
-
-    def get_current_ask(self, symbol: str) -> float:
-        symbol = (symbol or "").strip().upper()
-        path = f"/api/v1/crypto/marketdata/best_bid_ask/?symbol={symbol}"
-        data = self.make_api_request("GET", path)
-
-        if not data or "results" not in data or not data["results"]:
-            raise RuntimeError(f"Robinhood best_bid_ask returned no results for {symbol}: {data}")
-
-        result = data["results"][0]
-        # EXACTLY like rhcb.py's get_price(): ask_inclusive_of_buy_spread
-        return float(result["ask_inclusive_of_buy_spread"])
-
-
-def robinhood_current_ask(symbol: str) -> float:
-    """
-    Returns Robinhood current BUY price (ask_inclusive_of_buy_spread) for symbols like 'BTC-USD'.
-    Reads creds from r_key.txt and r_secret.txt in the same folder as this script.
-    """
-    global _RH_MD
-    if _RH_MD is None:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        key_path = os.path.join(base_dir, "r_key.txt")
-        secret_path = os.path.join(base_dir, "r_secret.txt")
-
-        if not os.path.isfile(key_path) or not os.path.isfile(secret_path):
-            raise RuntimeError(
-                "Missing r_key.txt and/or r_secret.txt next to pt_thinker.py. "
-                "Run pt_trader.py once to create them (and to set your Robinhood API key)."
-            )
-
-
-        with open(key_path, "r", encoding="utf-8") as f:
-            api_key = f.read()
-        with open(secret_path, "r", encoding="utf-8") as f:
-            priv_b64 = f.read()
-
-        _RH_MD = RobinhoodMarketData(api_key=api_key, base64_private_key=priv_b64)
-
-    return _RH_MD.get_current_ask(symbol)
+from nepse_data import NEPSEData as _NEPSEDataClass
+_nepse_instance = _NEPSEDataClass()
 
 
 def restart_program():
@@ -156,12 +60,12 @@ _GUI_SETTINGS_PATH = os.environ.get("POWERTRADER_GUI_SETTINGS") or os.path.join(
 
 _gui_settings_cache = {
 	"mtime": None,
-	"coins": ['BTC', 'ETH', 'XRP', 'BNB', 'DOGE'],  # fallback defaults
+	"coins": ['NABIL', 'NTC', 'NICA', 'NLIC', 'SBL'],  # fallback NEPSE defaults
 }
 
 def _load_gui_coins() -> list:
 	"""
-	Reads gui_settings.json and returns settings["coins"] as an uppercased list.
+	Reads gui_settings.json and returns settings["stocks"] (or "coins") as an uppercased list.
 	Caches by mtime so it is cheap to call frequently.
 	"""
 	try:
@@ -175,7 +79,8 @@ def _load_gui_coins() -> list:
 		with open(_GUI_SETTINGS_PATH, "r", encoding="utf-8") as f:
 			data = json.load(f) or {}
 
-		coins = data.get("coins", None)
+		# Accept "stocks" (NEPSE) or "coins" (legacy) key
+		coins = data.get("stocks", data.get("coins", None))
 		if not isinstance(coins, list) or not coins:
 			coins = list(_gui_settings_cache["coins"])
 
@@ -266,7 +171,8 @@ for _sym in CURRENT_COINS:
 
 
 distance = 0.5
-tf_choices = ['1hour', '2hour', '4hour', '8hour', '12hour', '1day', '1week']
+tf_choices = ['5d', '10d', '20d', '40d', '60d', '120d', '250d']
+tf_days    = [5, 10, 20, 40, 60, 120, 250]
 
 def new_coin_state():
 	return {
@@ -390,34 +296,17 @@ def init_coin(sym: str):
 
 	st = new_coin_state()
 
-	coin = sym + '-USDT'
-	ind = 0
+	coin = sym  # bare NEPSE symbol e.g. "NABIL"
+	# Initialize tf_times with the latest NEPSE candle date for each timeframe window.
+	# Since all timeframes use daily candles we just need the most recent date.
 	tf_times_local = []
-	while True:
-		history_list = []
-		while True:
-			try:
-				history = str(market.get_kline(coin, tf_choices[ind])).replace(']]', '], ').replace('[[', '[')
-				break
-			except Exception as e:
-				time.sleep(3.5)
-				if 'Requests' in str(e):
-					pass
-				else:
-					PrintException()
-				continue
-
-		history_list = history.split("], [")
-		ind += 1
+	for _ind in range(len(tf_choices)):
 		try:
-			working_minute = str(history_list[1]).replace('"', '').replace("'", "").split(", ")
-			the_time = working_minute[0].replace('[', '')
+			_ohlc = _nepse_instance.get_historical_ohlc(sym, days=2)
+			the_time = _ohlc[-1]['date'] if _ohlc else '0'
 		except Exception:
-			the_time = 0.0
-
+			the_time = '0'
 		tf_times_local.append(the_time)
-		if len(tf_times_local) >= len(tf_choices):
-			break
 
 	st['tf_times'] = tf_times_local
 	states[sym] = st
@@ -477,8 +366,16 @@ def find_purple_area(lines):
 def step_coin(sym: str):
 	# run inside the coin folder so all existing file reads/writes stay relative + isolated
 	os.chdir(coin_folder(sym))
-	coin = sym + '-USDT'
+	coin = sym  # bare NEPSE symbol e.g. "NABIL"
 	st = states[sym]
+
+	# --- NEPSE market hours gate ---
+	if not _NEPSEDataClass.is_market_open():
+		try:
+			display_cache[sym] = sym + "  (market closed - NEPSE 11:00-15:00 NST, Sun-Thu)"
+		except Exception:
+			pass
+		return
 
 	# --- training freshness gate ---
 	# If GUI would show NOT TRAINED (missing / stale trainer_last_training_time.txt),
@@ -548,32 +445,21 @@ def step_coin(sym: str):
 	last_difference_between = 0.0
 
 
-	# ====== ORIGINAL: fetch current candle for this timeframe index ======
+	# ====== NEPSE: fetch current candle for this timeframe window ======
 	while True:
-		history_list = []
-		while True:
-			try:
-				history = str(market.get_kline(coin, tf_choices[tf_choice_index])).replace(']]', '], ').replace('[[', '[')
-				break
-			except Exception as e:
-				time.sleep(3.5)
-				if 'Requests' in str(e):
-					pass
-				else:
-					pass
-				continue
-		history_list = history.split("], [")
-		# KuCoin can occasionally return an empty/short kline response.
-		# Guard against history_list[1] raising IndexError.
-		if len(history_list) < 2:
-			time.sleep(0.2)
-			continue
-		working_minute = str(history_list[1]).replace('"', '').replace("'", "").split(", ")
 		try:
-			openPrice = float(working_minute[1])
-			closePrice = float(working_minute[2])
+			_tf_window = tf_days[tf_choice_index]
+			_ohlc = _nepse_instance.get_historical_ohlc(coin, days=_tf_window + 2)
+			if len(_ohlc) < 2:
+				time.sleep(2)
+				continue
+			# Use second-to-last closed candle (mirrors KuCoin history_list[1] behavior)
+			_prev = _ohlc[-2]
+			openPrice = float(_prev['open'])
+			closePrice = float(_prev['close'])
 			break
 		except Exception:
+			time.sleep(3.5)
 			continue
 
 
@@ -730,14 +616,14 @@ def step_coin(sym: str):
 		# reset tf_update for this coin (but DO NOT block-wait; just detect updates and return)
 		tf_update = ['no'] * len(tf_choices)
 
-		# get current price ONCE per coin — use Robinhood's current ASK (same as rhcb trader buy price)
-		rh_symbol = f"{sym}-USD"
+		# get current price ONCE per coin — NEPSE last-traded price
 		while True:
 			try:
-				current = robinhood_current_ask(rh_symbol)
+				current = _nepse_instance.get_current_price(sym)
 				break
 			except Exception as e:
 				print(e)
+				time.sleep(3)
 				continue
 
 		# IMPORTANT: messages printed below use the bounds currently in state.
@@ -777,26 +663,12 @@ def step_coin(sym: str):
 		# per-timeframe message logic (same decisions as before)
 		inder = 0
 		while inder < len(tf_choices):
-			# update the_time snapshot (same as before)
-			while True:
-
-				try:
-					history = str(market.get_kline(coin, tf_choices[inder])).replace(']]', '], ').replace('[[', '[')
-					break
-				except Exception as e:
-					time.sleep(3.5)
-					if 'Requests' in str(e):
-						pass
-					else:
-						PrintException()
-					continue
-
-			history_list = history.split("], [")
+			# update the_time snapshot — use latest daily candle date for this window
 			try:
-				working_minute = str(history_list[1]).replace('"', '').replace("'", "").split(", ")
-				the_time = working_minute[0].replace('[', '')
+				_ohlc_snap = _nepse_instance.get_historical_ohlc(coin, days=2)
+				the_time = _ohlc_snap[-1]['date'] if _ohlc_snap else '0'
 			except Exception:
-				the_time = 0.0
+				the_time = '0'
 
 			# (original comparisons)
 			if current > high_bound_prices[inder] and high_tf_prices[inder] != low_tf_prices[inder]:
@@ -1035,33 +907,21 @@ def step_coin(sym: str):
 			PrintException()
 
 		# ====== NON-BLOCKING candle update check (single pass) ======
+		# For NEPSE daily candles, a "new candle" means a new trading date.
+		try:
+			_ohlc_update = _nepse_instance.get_historical_ohlc(coin, days=2)
+			_latest_date = _ohlc_update[-1]['date'] if _ohlc_update else '0'
+		except Exception:
+			_latest_date = '0'
+
 		this_index_now = 0
 		while this_index_now < len(tf_update):
-			while True:
-				try:
-					history = str(market.get_kline(coin, tf_choices[this_index_now])).replace(']]', '], ').replace('[[', '[')
-					break
-				except Exception as e:
-					time.sleep(3.5)
-					if 'Requests' in str(e):
-						pass
-					else:
-						PrintException()
-					continue
-
-			history_list = history.split("], [")
-			try:
-				working_minute = str(history_list[1]).replace('"', '').replace("'", "").split(", ")
-				the_time = working_minute[0].replace('[', '')
-			except Exception:
-				the_time = 0.0
-
+			the_time = _latest_date
 			if the_time != tf_times[this_index_now]:
 				del tf_update[this_index_now]
 				tf_update.insert(this_index_now, 'yes')
 				del tf_times[this_index_now]
 				tf_times.insert(this_index_now, the_time)
-
 			this_index_now += 1
 
 	# ====== save state back ======

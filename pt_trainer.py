@@ -1,5 +1,5 @@
-from kucoin.client import Market
-market = Market(url='https://api.kucoin.com')
+from nepse_data import NEPSEData as _NEPSEData
+_nepse_instance = _NEPSEData()
 import time
 """
 <------------
@@ -240,8 +240,8 @@ try:
 		pass
 except:
 	restarted_yet = 0
-tf_choices = ['1hour', '2hour', '4hour', '8hour', '12hour', '1day', '1week']
-tf_minutes = [60, 120, 240, 480, 720, 1440, 10080]
+tf_choices = ['5d', '10d', '20d', '40d', '60d', '120d', '250d']
+tf_days    = [5, 10, 20, 40, 60, 120, 250]
 # --- GUI HUB INPUT (NO PROMPTS) ---
 # Usage: python pt_trainer.py BTC [reprocess_yes|reprocess_no]
 _arg_coin = "BTC"
@@ -252,7 +252,7 @@ try:
 except Exception:
 	_arg_coin = "BTC"
 
-coin_choice = _arg_coin + '-USDT'
+coin_choice = _arg_coin  # bare NEPSE symbol e.g. "NABIL"
 
 restart_processing = "yes"
 
@@ -362,15 +362,15 @@ while True:
 	low_weight_list = _mem["low_weight_list"]
 	no_list = 'no' if len(memory_list) > 0 else 'yes'
 
-	tf_list = ['1hour',tf_choice,tf_choice]
+	tf_list = ['5d',tf_choice,tf_choice]
 	choice_index = tf_choices.index(tf_choice)
-	minutes_list = [60,tf_minutes[choice_index],tf_minutes[choice_index]]
+	days_list = [5,tf_days[choice_index],tf_days[choice_index]]
 	if restarted_yet < 2:
 		timeframe = tf_list[restarted_yet]#droplet setting (create list for all timeframes)
-		timeframe_minutes = minutes_list[restarted_yet]#droplet setting (create list for all timeframe_minutes)
+		timeframe_days = days_list[restarted_yet]#droplet setting (create list for all timeframe_days)
 	else:
 		timeframe = tf_list[2]#droplet setting (create list for all timeframes)
-		timeframe_minutes = minutes_list[2]#droplet setting (create list for all timeframe_minutes)
+		timeframe_days = days_list[2]#droplet setting (create list for all timeframe_days)
 	start_time = int(time.time())
 	restarting = 'no'
 	success_rate = 85
@@ -404,102 +404,36 @@ while True:
 			last_start_time = 0.0
 	else:
 		last_start_time = 0.0
-	end_time = int(start_time-((1500*timeframe_minutes)*60))
 	perc_comp = format((len(history_list2)/how_far_to_look_back)*100,'.2f')
 	last_perc_comp = perc_comp+'kjfjakjdakd'
-	while True:
-		time.sleep(.5)
-		try:
-			history = str(market.get_kline(coin_choice,timeframe,startAt=end_time,endAt=start_time)).replace(']]','], ').replace('[[','[').split('], [')
-		except Exception as e:
-			PrintException()
-			time.sleep(3.5)
-			continue
-		index = 0
-		while True:
-			history_list.append(history[index])
-			index += 1
-			if index >= len(history):
-				break
-			else:
-				continue
-		perc_comp = format((len(history_list)/how_far_to_look_back)*100,'.2f')
-		print('gathering history')
-		current_change = len(history_list)-list_len	
-		try:
-			print('\n\n\n\n')
-			print(current_change)
-			if current_change < 1000:
-				break
-			else:
-				pass
-		except:
-			PrintException()
-			pass
-		len_avg.append(current_change)
-		list_len = len(history_list)
-		last_perc_comp = perc_comp
-		start_time = end_time
-		end_time = int(start_time-((1500*timeframe_minutes)*60))
-		print(last_start_time)
-		print(start_time)
-		print(end_time)
-		print('\n')
-		if start_time <= last_start_time:
-			break
-		else:
-			continue
-	if timeframe == '1day' or timeframe == '1week':
-		if restarted_yet == 0:
-			index = int(len(history_list)/2)
-		else:
-			index = 1
-	else:
-		index = int(len(history_list)/2)
+	# --- NEPSE: fetch historical OHLC (replaces KuCoin paginated kline loop) ---
 	price_list = []
 	high_price_list = []
 	low_price_list = []
 	open_price_list = []
 	volume_list = []
-	minutes_passed = 0
+	price = 0.0
+	while True:
+		try:
+			print(f'gathering NEPSE history for {coin_choice} ({timeframe}) …')
+			_candles = _nepse_instance.get_historical_ohlc(coin_choice, days=max(tf_days))
+			# Slice to the window for this timeframe
+			_candles = _candles[-timeframe_days:]
+			open_price_list = [c['open']   for c in _candles]
+			price_list      = [c['close']  for c in _candles]
+			high_price_list = [c['high']   for c in _candles]
+			low_price_list  = [c['low']    for c in _candles]
+			volume_list     = [c['volume'] for c in _candles]
+			break
+		except Exception as e:
+			PrintException()
+			time.sleep(5)
+			continue
+	# Get current price (last traded) from NEPSE
 	try:
-		while True:
-			working_minute = str(history_list[index]).replace('"','').replace("'","").split(", ")
-			try:
-				if index == 1:
-					current_tf_time = float(working_minute[0].replace('[',''))
-					last_tf_time = current_tf_time
-				else:
-					pass
-				candle_time = float(working_minute[0].replace('[',''))
-				openPrice = float(working_minute[1])                
-				closePrice = float(working_minute[2])
-				highPrice = float(working_minute[3])
-				lowPrice = float(working_minute[4])
-				open_price_list.append(openPrice)
-				price_list.append(closePrice)
-				high_price_list.append(highPrice)
-				low_price_list.append(lowPrice)
-				index += 1
-				if index >= len(history_list):
-					break
-				else:
-					continue
-			except:
-				PrintException()
-				index += 1
-				if index >= len(history_list):
-					break
-				else:
-					continue
-		open_price_list.reverse()
-		price_list.reverse()
-		high_price_list.reverse()
-		low_price_list.reverse()
-		ticker_data = str(market.get_ticker(coin_choice)).replace('"','').replace("'","").replace("[","").replace("{","").replace("]","").replace("}","").replace(",","").lower().split(' ')
-		price = float(ticker_data[ticker_data.index('price:')+1])
-	except:
-		PrintException()
+		price = _nepse_instance.get_current_price(coin_choice)
+	except Exception:
+		price = price_list[-1] if price_list else 0.0
 	history_list = []
 	history_list2 = []
 	perfect_threshold = 1.0
